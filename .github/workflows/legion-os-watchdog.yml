@@ -17,7 +17,7 @@ jobs:
         run: |
           echo "=========================================="
           echo " Legion-OS Watchdog Starting"
-          echo " Monitoring workflow: legion-os-scheduled-build.yml"
+          echo " Monitoring workflow: -scheduled-build.yml"
           echo "=========================================="
           echo ""
 

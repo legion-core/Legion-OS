@@ -21,10 +21,9 @@ jobs:
       fail-fast: false
       matrix:
         recipe:
-          - 0-mesa.yml
-          - 0-nvidia.yml
-          - 0-mini.yml
-          - 0-nvidia-hybrid.yml
+          - mesa.yml
+          - nvidia.yml
+          - hybrid.yml
 
     steps:
       - name: Legion-OS build/update (automatic)
