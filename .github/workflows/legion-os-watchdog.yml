@@ -2,7 +2,7 @@ name: Legion-OS Watchdog
 
 on:
   workflow_dispatch:
-  ### watchdog runs are managed by cron-job.org ( much more reliable ) ###
+
 permissions:
   actions: write
   contents: read
@@ -12,96 +12,116 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Watchdog heartbeat check
+      - name: Legion-OS Build Health Monitor
         id: check
         run: |
-          echo "=========================================="
-          echo " Legion-OS Watchdog Starting"
-          echo " Monitoring workflow: legion-os-scheduled-builder.yml"
-          echo "=========================================="
+          set -euo pipefail
+
+          echo ""
+          echo "================================================="
+          echo " Legion-OS Build Health Monitor Starting"
+          echo "================================================="
+          echo "Target workflow: legion-os-scheduled-builder.yml"
           echo ""
 
-          echo "Fetching recent builder workflow runs..."
+          API_URL="https://api.github.com/repos/${{ github.repository }}/actions/workflows/legion-os-scheduled-builder.yml/runs?per_page=30"
 
-          RESPONSE=$(curl -s \
+          echo "[INFO] Contacting GitHub API..."
+          RESPONSE=$(curl -fsSL \
             -H "Authorization: Bearer ${{ github.token }}" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/legion-os-scheduled-builder.yml/runs?per_page=5")
+            "$API_URL") || {
+              echo "[ERROR] GitHub API unreachable."
+              echo "[SAFEGUARD] Skipping rebuild to avoid false trigger."
+              echo "stale=false" >> $GITHUB_OUTPUT
+              exit 0
+          }
 
-          echo ""
-          echo "Last 3 builder workflow runs:"
-          echo "------------------------------------------"
+          echo "[OK] API reachable."
 
-          echo "$RESPONSE" | jq -r '
+          TOTAL_RUNS=$(echo "$RESPONSE" | jq '.workflow_runs | length')
+          echo "[INFO] Total workflow runs received: $TOTAL_RUNS"
+
+          RUNS=$(echo "$RESPONSE" | jq '
             .workflow_runs
-            | map(select(.event=="workflow_dispatch"))
-            | .[0:3]
-            | .[]
-            | "Run ID: \(.id) | Commit: \(.head_sha) | Event: \(.event) | Updated: \(.updated_at)"
-          '
-
-          LAST_RUN=$(echo "$RESPONSE" | jq -r '
-            .workflow_runs
-            | map(select(.event=="workflow_dispatch"))
-            | .[0].updated_at
+            | map(select(.status=="completed"))
+            | map(select(.head_branch=="main"))
+            | .[0:10]
           ')
 
-          if [ "$LAST_RUN" = "null" ] || [ -z "$LAST_RUN" ]; then
-            echo ""
-            echo "⚠ No qualifying builder workflow runs found."
-            echo "no_run=true" >> $GITHUB_OUTPUT
+          COUNT=$(echo "$RUNS" | jq 'length')
+          echo "[INFO] Completed runs on main selected: $COUNT"
+
+          if [ "$COUNT" -lt 5 ]; then
+            echo "[WARN] Not enough data for reliable analysis."
+            echo "[SAFEGUARD] Skipping rebuild."
+            echo "stale=false" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          LAST_EPOCH=$(date -d "$LAST_RUN" +%s)
-          NOW_EPOCH=$(date +%s)
+          echo ""
+          echo "--------------- Analyzed Runs ---------------"
+          echo "$RUNS" | jq -r '
+            .[]
+            | "Run ID: \(.id) | Conclusion: \(.conclusion) | Updated: \(.updated_at)"
+          '
+          echo "--------------------------------------------"
 
-          AGE_MIN=$(( (NOW_EPOCH - LAST_EPOCH) / 60 ))
-          THRESHOLD=720
-          REMAINING=$(( THRESHOLD - AGE_MIN ))
+          FAIL_STREAK=0
+          INDEX=1
 
           echo ""
-          echo "------------------------------------------"
-          echo "Current time UTC:      $(date -u)"
-          echo "Current time Kolkata:  $(TZ=Asia/Kolkata date)"
-          echo ""
-          echo "Last activity UTC:     $(date -u -d "$LAST_RUN")"
-          echo "Last activity Kolkata: $(TZ=Asia/Kolkata date -d "$LAST_RUN")"
-          echo ""
-          echo "Minutes since last activity: $AGE_MIN"
-          echo "Watchdog threshold:          $THRESHOLD minutes"
+          echo "[INFO] Calculating consecutive failure streak..."
 
-          if [ "$AGE_MIN" -gt "$THRESHOLD" ]; then
-            echo "Decision: ❌ STALE"
-            echo "Watchdog will trigger rebuild now."
+          for RESULT in $(echo "$RUNS" | jq -r '.[].conclusion'); do
+            echo "  Run $INDEX => $RESULT"
+
+            if [ "$RESULT" = "success" ]; then
+              echo "  Encountered SUCCESS → stopping streak count."
+              break
+            elif [ "$RESULT" = "failure" ]; then
+              FAIL_STREAK=$((FAIL_STREAK+1))
+            else
+              echo "  Non-standard conclusion ($RESULT) → stopping."
+              break
+            fi
+
+            INDEX=$((INDEX+1))
+          done
+
+          echo ""
+          echo "[RESULT] Consecutive failures detected: $FAIL_STREAK"
+
+          if [ "$FAIL_STREAK" -ge 5 ]; then
+            echo "[DECISION] System UNHEALTHY"
+            echo "[ACTION] Rebuild will be triggered."
             echo "stale=true" >> $GITHUB_OUTPUT
           else
-            echo "Decision: ✅ HEALTHY"
-            echo "Minutes remaining before trigger: $REMAINING"
+            echo "[DECISION] System HEALTHY"
+            echo "[ACTION] No rebuild required."
             echo "stale=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Trigger rebuild if needed
-        if: steps.check.outputs.stale == 'true' || steps.check.outputs.no_run == 'true'
+      - name: Trigger rebuild if unhealthy
+        if: steps.check.outputs.stale == 'true'
         run: |
           echo ""
-          echo "=========================================="
-          echo " Triggering Legion-OS rebuild"
-          echo "=========================================="
+          echo "================================================="
+          echo " Triggering Legion-OS Scheduled Builder"
+          echo "================================================="
 
-          curl -X POST \
+          curl -fsSL -X POST \
             -H "Authorization: Bearer ${{ github.token }}" \
             -H "Accept: application/vnd.github+json" \
             https://api.github.com/repos/${{ github.repository }}/actions/workflows/legion-os-scheduled-builder.yml/dispatches \
             -d '{"ref":"main"}'
 
-          echo "Rebuild request sent."
+          echo "[OK] Rebuild dispatch sent."
 
-      - name: No action required
+      - name: System healthy
         if: steps.check.outputs.stale == 'false'
         run: |
           echo ""
-          echo "=========================================="
-          echo " No rebuild required"
-          echo " System healthy"
-          echo "=========================================="
+          echo "================================================="
+          echo " Legion-OS Pipeline Healthy"
+          echo "================================================="
